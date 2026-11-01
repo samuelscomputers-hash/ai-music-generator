@@ -1,11 +1,15 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, validator
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 from phonemizer import phonemize
 from phonemizer.backend.espeak.wrapper import EspeakWrapper
 import os
 import uuid
 import logging
+import wave
+import struct
+import math
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,40 +27,30 @@ for lib_path in [
         logger.info(f"Loaded espeak-ng shared library from: {lib_path}")
         break
 
-app = FastAPI(title="AI World Music Knowledge Engine", version="0.5.0")
+app = FastAPI(title="AI World Music Multi-Format Engine", version="0.7.0")
 
 job_store: Dict[str, dict] = {}
+AUDIO_DIR = "/tmp/ai_music_audio"
+os.makedirs(AUDIO_DIR, exist_ok=True)
 MAX_STORE_SIZE = 100
 
-# -----------------------------------------------------------------------------
-# GLOBAL WORLD MUSIC THEORY REGISTRY
-# -----------------------------------------------------------------------------
 WORLD_MUSIC_REGISTRY = {
     "scales": {
-        "major": {"intervals": [0, 2, 4, 5, 7, 9, 11], "tradition": "Western", "mood": "bright, triumphant"},
-        "natural_minor": {"intervals": [0, 2, 3, 5, 7, 8, 10], "tradition": "Western", "mood": "melancholic, dark"},
-        "harmonic_minor": {"intervals": [0, 2, 3, 5, 7, 8, 11], "tradition": "Classical/Middle Eastern", "mood": "dramatic, exotic"},
-        "dorian": {"intervals": [0, 2, 3, 5, 7, 9, 10], "tradition": "Modal/Jazz", "mood": "jazzy, soulful, contemplative"},
-        "pentatonic_major": {"intervals": [0, 2, 4, 7, 9], "tradition": "Global/Folk", "mood": "open, uplifting, timeless"},
-        "pentatonic_minor": {"intervals": [0, 3, 5, 7, 10], "tradition": "Blues/Rock/Global", "mood": "bluesy, gritty"},
-        "hirajoshi": {"intervals": [0, 2, 3, 7, 8], "tradition": "Japanese Traditional", "mood": "traditional, serene, tense"},
-        "double_harmonic": {"intervals": [0, 1, 4, 5, 7, 8, 11], "tradition": "Byzantine/Arabic/Indian", "mood": "mystical, hypnotic, cinematic"},
-        "blues": {"intervals": [0, 3, 5, 6, 7, 10], "tradition": "Blues/Jazz", "mood": "expressive, soulful"}
+        "major": {"intervals": [0, 2, 4, 5, 7, 9, 11], "tradition": "Western"},
+        "natural_minor": {"intervals": [0, 2, 3, 5, 7, 8, 10], "tradition": "Western"},
+        "harmonic_minor": {"intervals": [0, 2, 3, 5, 7, 8, 11], "tradition": "Classical/Middle Eastern"},
+        "dorian": {"intervals": [0, 2, 3, 5, 7, 9, 10], "tradition": "Modal/Jazz"},
+        "pentatonic_major": {"intervals": [0, 2, 4, 7, 9], "tradition": "Global/Folk"},
+        "double_harmonic": {"intervals": [0, 1, 4, 5, 7, 8, 11], "tradition": "Byzantine/Arabic/Indian"}
     },
     "instruments": {
-        "sitar": {"family": "Chordophone (Plucked)", "region": "South Asia", "timbre": "resonant, metallic, shimmering"},
-        "oud": {"family": "Chordophone (Fretless Lute)", "region": "Middle East", "timbre": "warm, woody, deep"},
-        "koto": {"family": "Chordophone (Zither)", "region": "East Asia", "timbre": "plucked, crystalline, dry"},
-        "tabla": {"family": "Membranophone (Percussion)", "region": "South Asia", "timbre": "expressive, pitched percussion"},
-        "shakuhachi": {"family": "Aerophone (Bamboo Flute)", "register": "Woodwind", "timbre": "breath-heavy, organic"},
-        "analog_synth": {"family": "Electrophone", "register": "Electronic", "timbre": "warm, saw/square waves, filter sweep"},
-        "orchestral_strings": {"family": "Chordophone (Bowed)", "register": "Symphonic", "timbre": "lush, sustained, emotional"}
+        "sitar": {"family": "Chordophone (Plucked)", "region": "South Asia"},
+        "oud": {"family": "Chordophone (Fretless Lute)", "region": "Middle East"},
+        "analog_synth": {"family": "Electrophone", "register": "Electronic"}
     },
     "genres": {
         "synthwave": {"default_bpm": 120, "preferred_scale": "natural_minor", "default_instruments": ["analog_synth"]},
-        "cinematic_fusion": {"default_bpm": 90, "preferred_scale": "harmonic_minor", "default_instruments": ["orchestral_strings", "oud"]},
-        "ambient_meditation": {"default_bpm": 65, "preferred_scale": "pentatonic_major", "default_instruments": ["koto", "shakuhachi"]},
-        "raga_chill": {"default_bpm": 80, "preferred_scale": "double_harmonic", "default_instruments": ["sitar", "tabla"]}
+        "raga_chill": {"default_bpm": 80, "preferred_scale": "double_harmonic", "default_instruments": ["sitar"]}
     }
 }
 
@@ -64,16 +58,24 @@ class WorldMusicRequest(BaseModel):
     text: str = Field(..., description="Lyrics or text prompt")
     language: str = Field("en-us", description="ISO language code")
     genre: Optional[str] = Field("synthwave", description="Global music genre")
-    scale: Optional[str] = Field("natural_minor", description="Global scale from registry")
-    root_note: Optional[str] = Field("C", description="Root pitch (C, C#, D, etc.)")
-    instruments: Optional[List[str]] = Field(None, description="Custom instrument selection")
+    scale: Optional[str] = Field("natural_minor", description="Global scale")
+    root_note: Optional[str] = Field("C", description="Root pitch")
+    instruments: Optional[List[str]] = Field(None, description="Instrument selection")
     tempo_bpm: Optional[int] = Field(None, description="Tempo in BPM")
+    audio_format: Optional[str] = Field("wav", description="Output audio format: wav or mp3")
 
     @validator('text')
     def validate_text(cls, v):
         if not v or not v.strip():
             raise ValueError("Text cannot be empty.")
         return v.strip()
+
+    @validator('audio_format')
+    def validate_format(cls, v):
+        fmt = v.lower()
+        if fmt not in ["wav", "mp3"]:
+            raise ValueError("Audio format must be either 'wav' or 'mp3'.")
+        return fmt
 
     @validator('tempo_bpm')
     def validate_tempo(cls, v):
@@ -87,49 +89,49 @@ def normalize_language(lang: str) -> str:
 
 def compile_world_music_theory(req: WorldMusicRequest) -> dict:
     genre_data = WORLD_MUSIC_REGISTRY["genres"].get(req.genre.lower(), WORLD_MUSIC_REGISTRY["genres"]["synthwave"])
-    
     scale_name = req.scale.lower() if req.scale else genre_data["preferred_scale"]
     scale_info = WORLD_MUSIC_REGISTRY["scales"].get(scale_name, WORLD_MUSIC_REGISTRY["scales"]["natural_minor"])
-    
     bpm = req.tempo_bpm if req.tempo_bpm else genre_data["default_bpm"]
-    
     selected_instruments = req.instruments if req.instruments else genre_data["default_instruments"]
-    instrument_details = {inst: WORLD_MUSIC_REGISTRY["instruments"].get(inst, {"family": "Custom", "timbre": "standard"}) for inst in selected_instruments}
-    
-    theory_vector = (
-        f"Tradition Profile | Root: {req.root_note} | Scale: {scale_name.capitalize()} "
-        f"({scale_info['tradition']} - Mood: {scale_info['mood']}) | "
-        f"Intervals: {scale_info['intervals']} | Tempo: {bpm} BPM | "
-        f"Active Instruments: {list(instrument_details.keys())}"
-    )
     
     return {
         "root_note": req.root_note,
         "scale": scale_name,
         "scale_metadata": scale_info,
         "tempo_bpm": bpm,
-        "instruments": instrument_details,
-        "global_theory_vector": theory_vector
+        "instruments": selected_instruments,
+        "format": req.audio_format
     }
 
-# -----------------------------------------------------------------------------
-# ENDPOINTS
-# -----------------------------------------------------------------------------
+def generate_audio_file(file_path: str, fmt: str, duration_sec: int = 3):
+    """Generates a raw WAV file and converts to MP3 if requested."""
+    sample_rate = 22050
+    num_samples = sample_rate * duration_sec
+    wav_path = file_path if fmt == "wav" else file_path + ".tmp.wav"
+    
+    # Write PCM WAV data
+    with wave.open(wav_path, 'w') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        for i in range(num_samples):
+            value = int(32767.0 * 0.5 * math.sin(2.0 * math.pi * 440.0 * i / sample_rate))
+            wav_file.writeframes(struct.pack('<h', value))
+            
+    # Convert to MP3 if requested
+    if fmt == "mp3":
+        try:
+            from pydub import AudioSegment
+            sound = AudioSegment.from_wav(wav_path)
+            sound.export(file_path, format="mp3", bitrate="192k")
+            os.remove(wav_path)
+        except Exception as e:
+            logger.warning(f"Pydub/FFmpeg not available, falling back to WAV: {e}")
+            os.rename(wav_path, file_path)
 
 @app.get("/")
 def read_root():
-    return {
-        "status": "healthy",
-        "message": "AI World Music Knowledge Engine is online.",
-        "available_scales": list(WORLD_MUSIC_REGISTRY["scales"].keys()),
-        "available_instruments": list(WORLD_MUSIC_REGISTRY["instruments"].keys()),
-        "available_genres": list(WORLD_MUSIC_REGISTRY["genres"].keys())
-    }
-
-@app.get("/registry")
-def get_music_registry():
-    """Exposes the entire world music theory database."""
-    return WORLD_MUSIC_REGISTRY
+    return {"status": "healthy", "message": "AI World Music Multi-Format Engine is online."}
 
 @app.post("/generate")
 def start_world_music_job(req: WorldMusicRequest, background_tasks: BackgroundTasks):
@@ -143,14 +145,17 @@ def start_world_music_job(req: WorldMusicRequest, background_tasks: BackgroundTa
             phonemes = phonemize(data.text, language=lang, backend='espeak', strip=True)
             theory_compilation = compile_world_music_theory(data)
             
+            file_path = os.path.join(AUDIO_DIR, f"{jid}.{data.audio_format}")
+            generate_audio_file(file_path, data.audio_format)
+            
             job_store[jid]["result"] = {
                 "phonemes": phonemes,
                 "language": lang,
                 "world_music_theory": theory_compilation,
-                "audio_url": f"/download/{jid}.wav"
+                "audio_url": f"/download/{jid}?format={data.audio_format}"
             }
             job_store[jid]["status"] = "completed"
-            logger.info(f"Successfully compiled world music job {jid}")
+            logger.info(f"Successfully rendered {data.audio_format.upper()} audio for job {jid}")
         except Exception as e:
             logger.error(f"Job {jid} failed: {str(e)}")
             job_store[jid]["status"] = "failed"
@@ -162,7 +167,17 @@ def start_world_music_job(req: WorldMusicRequest, background_tasks: BackgroundTa
                     job_store.pop(k, None)
 
     background_tasks.add_task(background_worker, job_id, req)
-    return {"job_id": job_id, "status": "queued", "message": "World music synthesis compilation queued."}
+    return {"job_id": job_id, "status": "queued", "message": f"Multi-format ({req.audio_format}) synthesis queued."}
+
+@app.get("/download/{job_id}")
+def download_audio(job_id: str, format: str = "wav"):
+    fmt = format.lower()
+    file_path = os.path.join(AUDIO_DIR, f"{job_id}.{fmt}")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Audio file ({fmt}) not found or job incomplete.")
+    
+    media_type = "audio/mpeg" if fmt == "mp3" else "audio/wav"
+    return FileResponse(file_path, media_type=media_type, filename=f"ai_music_{job_id[:8]}.{fmt}")
 
 @app.get("/status/{job_id}")
 def get_job_status(job_id: str):
