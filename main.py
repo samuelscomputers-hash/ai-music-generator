@@ -27,10 +27,10 @@ for lib_path in [
         logger.info(f"Loaded espeak-ng shared library from: {lib_path}")
         break
 
-app = FastAPI(title="AI World Music Multi-Format Engine", version="0.7.0")
+app = FastAPI(title="AI World Music Multi-Format Engine", version="0.7.1")
 
 job_store: Dict[str, dict] = {}
-AUDIO_DIR = "/tmp/ai_music_audio"
+AUDIO_DIR = "audio_output"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 MAX_STORE_SIZE = 100
 
@@ -104,12 +104,10 @@ def compile_world_music_theory(req: WorldMusicRequest) -> dict:
     }
 
 def generate_audio_file(file_path: str, fmt: str, duration_sec: int = 3):
-    """Generates a raw WAV file and converts to MP3 if requested."""
     sample_rate = 22050
     num_samples = sample_rate * duration_sec
     wav_path = file_path if fmt == "wav" else file_path + ".tmp.wav"
     
-    # Write PCM WAV data
     with wave.open(wav_path, 'w') as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
@@ -118,7 +116,6 @@ def generate_audio_file(file_path: str, fmt: str, duration_sec: int = 3):
             value = int(32767.0 * 0.5 * math.sin(2.0 * math.pi * 440.0 * i / sample_rate))
             wav_file.writeframes(struct.pack('<h', value))
             
-    # Convert to MP3 if requested
     if fmt == "mp3":
         try:
             from pydub import AudioSegment
@@ -126,7 +123,7 @@ def generate_audio_file(file_path: str, fmt: str, duration_sec: int = 3):
             sound.export(file_path, format="mp3", bitrate="192k")
             os.remove(wav_path)
         except Exception as e:
-            logger.warning(f"Pydub/FFmpeg not available, falling back to WAV: {e}")
+            logger.warning(f"Pydub/FFmpeg conversion fallback to WAV: {e}")
             os.rename(wav_path, file_path)
 
 @app.get("/")
