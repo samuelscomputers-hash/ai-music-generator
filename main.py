@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from phonemizer import phonemize
+import shutil
 
 app = FastAPI()
 
@@ -15,11 +16,17 @@ def read_root():
 @app.post("/g2p")
 def convert_to_phonemes(req: TextRequest):
     try:
+        # Locate espeak-ng binary in Termux
+        espeak_path = shutil.which("espeak-ng") or shutil.which("espeak")
+        if not espeak_path:
+            espeak_path = "/data/data/com.termux/files/usr/bin/espeak-ng"
+            
         phonemes = phonemize(
             req.text,
             language=req.language,
             backend='espeak',
-            strip=True
+            strip=True,
+            espeak_path=espeak_path
         )
         return {
             "text": req.text,
