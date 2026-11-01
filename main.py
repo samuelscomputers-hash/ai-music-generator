@@ -15,16 +15,25 @@ for lib_path in [
         EspeakWrapper.set_library(lib_path)
         break
 
-app = FastAPI(title="AI Music Generator API", version="0.2.0")
+app = FastAPI(title="AI Music Generator API", version="0.2.1")
 
-# In-memory job tracker for asynchronous tasks
 job_store: Dict[str, dict] = {}
 
 class MusicGenerationRequest(BaseModel):
     text: str = Field(..., description="Lyrics or text prompt to convert and synthesize")
-    language: str = Field("en-us", description="ISO language code (e.g., en-us, fr, es)")
+    language: str = Field("en-us", description="ISO language code")
     genre: Optional[str] = Field("ambient", description="Musical style or genre tag")
     tempo_bpm: Optional[int] = Field(120, description="Tempo in beats per minute")
+
+def normalize_language(lang: str) -> str:
+    # Map shorthand codes to espeak-ng compatible dialects
+    mapping = {
+        "fr": "fr-fr",
+        "es": "es-es",
+        "de": "de-de",
+        "en": "en-us"
+    }
+    return mapping.get(lang.lower(), lang)
 
 @app.get("/")
 def read_root():
@@ -33,15 +42,16 @@ def read_root():
 @app.post("/g2p")
 def convert_to_phonemes(req: MusicGenerationRequest):
     try:
+        lang = normalize_language(req.language)
         phonemes = phonemize(
             req.text,
-            language=req.language,
+            language=lang,
             backend='espeak',
             strip=True
         )
         return {
             "text": req.text,
-            "language": req.language,
+            "language": lang,
             "genre": req.genre,
             "tempo_bpm": req.tempo_bpm,
             "phonemes": phonemes
@@ -52,16 +62,14 @@ def convert_to_phonemes(req: MusicGenerationRequest):
 def process_music_generation_task(job_id: str, req: MusicGenerationRequest):
     try:
         job_store[job_id]["status"] = "processing"
+        lang = normalize_language(req.language)
         
-        # Step 1: Phoneme conversion
-        phonemes = phonemize(req.text, language=req.language, backend='espeak', strip=True)
-        
-        # Step 2: Placeholder for model conditioning / audio rendering loop
-        # (Next module will plug into neural codecs here)
+        phonemes = phonemize(req.text, language=lang, backend='espeak', strip=True)
         
         job_store[job_id]["status"] = "completed"
         job_store[job_id]["result"] = {
             "phonemes": phonemes,
+            "language": lang,
             "genre": req.genre,
             "tempo_bpm": req.tempo_bpm,
             "audio_url": f"/download/{job_id}.wav"
@@ -74,9 +82,7 @@ def process_music_generation_task(job_id: str, req: MusicGenerationRequest):
 def start_generation_job(req: MusicGenerationRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     job_store[job_id] = {"status": "queued", "request": req.dict()}
-    
     background_tasks.add_task(process_music_generation_task, job_id, req)
-    
     return {"job_id": job_id, "status": "queued", "message": "Generation job started in background."}
 
 @app.get("/status/{job_id}")
