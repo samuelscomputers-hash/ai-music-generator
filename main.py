@@ -1,7 +1,17 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from phonemizer import phonemize
-import shutil
+from phonemizer.backend.espeak.wrapper import EspeakWrapper
+import os
+
+# Configure shared library path for Termux Android
+for lib_path in [
+    "/data/data/com.termux/files/usr/lib/libespeak-ng.so",
+    "/data/data/com.termux/files/usr/lib/libespeak.so"
+]:
+    if os.path.exists(lib_path):
+        EspeakWrapper.set_library(lib_path)
+        break
 
 app = FastAPI()
 
@@ -16,17 +26,11 @@ def read_root():
 @app.post("/g2p")
 def convert_to_phonemes(req: TextRequest):
     try:
-        # Locate espeak-ng binary in Termux
-        espeak_path = shutil.which("espeak-ng") or shutil.which("espeak")
-        if not espeak_path:
-            espeak_path = "/data/data/com.termux/files/usr/bin/espeak-ng"
-            
         phonemes = phonemize(
             req.text,
             language=req.language,
             backend='espeak',
-            strip=True,
-            espeak_path=espeak_path
+            strip=True
         )
         return {
             "text": req.text,
